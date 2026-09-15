@@ -56,9 +56,10 @@ duplicate still produces an execution you can point at in the log. That is
 better for the demo (you can show the skip happening) and keeps duplicate
 filtering in the one place that has tests around it.
 
-If you prefer to filter at the trigger, write it as
-`not dt.davis.is_duplicate == true` — never `== false`, which matches nothing if
-the field is null on non-duplicates.
+If you prefer to filter at the trigger, use a null-safe form — see below. The
+JS task already handles nulls correctly: `extractContext()` falls back to
+`false` when the field is missing, so an absent flag means "not a duplicate"
+and the incident is still created.
 
 ## Prerequisites
 
@@ -75,16 +76,40 @@ the field is null on non-duplicates.
 Use the event trigger with a custom filter:
 
 ```
-event.kind == "DAVIS_PROBLEM" and not dt.davis.is_duplicate == true
+event.kind == "DAVIS_PROBLEM"
 ```
 
-**Write it as `not ... == true`, not `== false`.** If the field is absent or
-null on a non-duplicate problem — which has not been confirmed either way —
-then `dt.davis.is_duplicate == false` filters out *everything* and the workflow
-never fires. `not ... == true` is null-safe and is the form the Dynatrace
-documentation itself uses. Verify against a real problem before the demo.
-
 Filter expressions are capped at 1,000 characters.
+
+#### If you filter duplicates at the trigger, mind the null semantics
+
+DQL is three-valued: a comparison against a null field returns **null, not
+false**, and `not` propagates that null rather than inverting it. So these three
+are equivalent, and all of them drop records where the field is absent:
+
+```
+dt.davis.is_duplicate == false
+not dt.davis.is_duplicate == true
+dt.davis.is_duplicate != true
+```
+
+Measured on 430,175 records carrying a boolean that is true on 14,917, false on
+44,537 and absent on 370,721: each of the three forms above matched exactly
+44,537 — the explicit-false rows only. The null rows matched none of them.
+
+If `dt.davis.is_duplicate` turns out to be absent rather than explicitly false
+on a non-duplicate problem, any of those filters would silence the workflow
+entirely. The null-safe forms both matched 415,258 (explicit false + absent):
+
+```
+isNull(dt.davis.is_duplicate) or dt.davis.is_duplicate == false
+coalesce(dt.davis.is_duplicate, false) == false
+```
+
+Whether the trigger's filter expression accepts `isNull()` / `coalesce()` is
+unverified — check in the UI. This is a further reason the shipped workflow
+filters duplicates in the JS task instead, where the fallback is explicit and
+covered by tests.
 
 ### 2. JavaScript task — `route_incident`
 
