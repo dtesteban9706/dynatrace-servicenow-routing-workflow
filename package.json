@@ -1,0 +1,10 @@
+{
+  "name": "dynatrace-servicenow-routing-workflow",
+  "version": "1.0.0",
+  "description": "Single-workflow routing-table demo for Dynatrace -> ServiceNow incident creation",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node test_routing.js"
+  }
+}

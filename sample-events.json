@@ -1,0 +1,55 @@
+{
+  "_comment": "Davis problem payloads for rehearsing the workflow by manual execution, when the tenant has no real problems to trigger on. Field names are the unverified best guess also used by extractContext() in routing.js — replace with a real payload as soon as you have one.",
+
+  "routed_sap": {
+    "event.kind": "DAVIS_PROBLEM",
+    "event.id": "-84021_1699V2",
+    "display_id": "P-25091",
+    "event.name": "CPU saturation on erp-prod-04",
+    "event.status": "ACTIVE",
+    "dt.davis.is_duplicate": false,
+    "dt.davis.mzs": ["SAP Production"],
+    "affected_entity_tags": [{ "key": "app", "value": "sap" }]
+  },
+
+  "routed_kubernetes": {
+    "event.kind": "DAVIS_PROBLEM",
+    "event.id": "-99112_2288V2",
+    "display_id": "P-25092",
+    "event.name": "Pod evicted on k8s-node-prod-11",
+    "event.status": "ACTIVE",
+    "dt.davis.is_duplicate": false,
+    "dt.davis.mzs": ["Cloud Prod"],
+    "affected_entity_tags": [{ "key": "platform", "value": "kubernetes" }]
+  },
+
+  "unrouted_new_application": {
+    "event.kind": "DAVIS_PROBLEM",
+    "event.id": "-77777_3333V2",
+    "display_id": "P-25094",
+    "event.name": "Disk latency on wms-app-02",
+    "event.status": "ACTIVE",
+    "dt.davis.is_duplicate": false,
+    "dt.davis.mzs": ["Warehouse Systems"]
+  },
+
+  "merged_duplicate": {
+    "event.kind": "DAVIS_PROBLEM",
+    "event.id": "-84022_1700V2",
+    "display_id": "P-25093",
+    "event.name": "CPU saturation on erp-prod-04",
+    "event.status": "ACTIVE",
+    "dt.davis.is_duplicate": true,
+    "dt.davis.mzs": ["SAP Production"]
+  },
+
+  "closed_problem": {
+    "event.kind": "DAVIS_PROBLEM",
+    "event.id": "-84021_1699V2",
+    "display_id": "P-25091",
+    "event.name": "CPU saturation on erp-prod-04",
+    "event.status": "CLOSED",
+    "dt.davis.is_duplicate": false,
+    "dt.davis.mzs": ["SAP Production"]
+  }
+}

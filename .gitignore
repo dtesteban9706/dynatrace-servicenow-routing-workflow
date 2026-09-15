@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+
+# Delivery artifact — byte-identical copy of the generated workflow.json
+servicenow_incidents_workflow.json

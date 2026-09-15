@@ -1,0 +1,133 @@
+{
+  "title": "ServiceNow incidents — single workflow, table-driven routing",
+  "description": "One workflow for every application. Assignment-group routing is a lookup table inside the route_incident task; adding an application is one entry in it. Merged duplicate problems are filtered before any incident is opened.",
+  "schemaVersion": 3,
+  "trigger": {
+    "eventTrigger": {
+      "isActive": true,
+      "filterQuery": "event.kind == \"DAVIS_PROBLEM\"",
+      "triggerConfiguration": {
+        "type": "event",
+        "value": {
+          "eventType": "events",
+          "query": "event.kind == \"DAVIS_PROBLEM\""
+        }
+      }
+    }
+  },
+  "tasks": {
+    "route_incident": {
+      "name": "route_incident",
+      "description": "Decide create / resolve / skip, and which assignment group applies.",
+      "action": "dynatrace.automations:run-javascript",
+      "input": {
+        "script": "/**\n * Dynatrace Workflow — JavaScript task body.\n *\n * ONE workflow serves every application. Routing is a table lookup, not a\n * separate workflow per app or per alerting profile. Adding an application is\n * one entry in ROUTING_TABLE below.\n *\n * Returns an object consumed by the downstream ServiceNow action.\n */\n\n// ============================================================================\n// ROUTING TABLE — the only part that changes when an application is added.\n// First match wins, so put specific rules above general ones.\n// ============================================================================\n\nconst ROUTING_TABLE = [\n  {\n    name: \"SAP Production\",\n    match: { managementZone: \"SAP Production\" },\n    assignmentGroup: \"SAP Basis\",\n    category: \"Software\",\n    impact: 1,\n  },\n  {\n    name: \"Storefront (web)\",\n    match: { managementZone: [\"Storefront - Prod\", \"Storefront - DR\"] },\n    assignmentGroup: \"Digital Platform L2\",\n    category: \"Application\",\n    impact: 2,\n  },\n  {\n    name: \"Kubernetes platform\",\n    match: { entityTag: \"platform:kubernetes\" },\n    assignmentGroup: \"Cloud Platform L2\",\n    category: \"Infrastructure\",\n    impact: 2,\n  },\n  {\n    name: \"EDI gateway\",\n    match: { entityTag: \"app:edi\", titleMatches: \"(?i)saturation|unavailable\" },\n    assignmentGroup: \"Integration Services\",\n    category: \"Application\",\n    impact: 2,\n  },\n  // <-- Adding the next application is a single entry here.\n];\n\n// Anything that matches no rule still gets an incident — it is never dropped.\nconst DEFAULT_ROUTE = {\n  name: \"Unrouted\",\n  assignmentGroup: \"Service Desk\",\n  category: \"Inquiry\",\n  impact: 3,\n};\n\n// ============================================================================\n// Payload mapping — THE ONE PLACE TO FIX if field names differ.\n// The Davis problem event payload shape was not verifiable ahead of time, so\n// each field is read from several plausible locations. Confirm against a real\n// payload (run the workflow once, inspect the trigger output) and then delete\n// the branches you do not need.\n// ============================================================================\n\nfunction extractContext(event) {\n  const first = (...candidates) =>\n    candidates.find((v) => v !== undefined && v !== null && v !== \"\");\n\n  const asArray = (v) => (v === undefined || v === null ? [] : [].concat(v));\n\n  return {\n    problemId: first(event[\"event.id\"], event.problemId, event.id),\n    displayId: first(event[\"display_id\"], event.displayId, event.problemDisplayId),\n    title: first(event[\"event.name\"], event.title, event[\"event.description\"], \"\"),\n    status: String(first(event[\"event.status\"], event.status, \"ACTIVE\")).toUpperCase(),\n    severity: first(event[\"event.category\"], event.severityLevel, \"\"),\n    isDuplicate:\n      first(event[\"dt.davis.is_duplicate\"], event.isDuplicate, false) === true,\n    managementZones: asArray(\n      first(event[\"dt.davis.mzs\"], event.managementZones, event.managementZone, [])\n    ).map((z) => (typeof z === \"object\" ? z.name : z)),\n    tags: asArray(first(event[\"affected_entity_tags\"], event.entityTags, [])).map(\n      (t) =>\n        typeof t === \"object\"\n          ? t.value\n            ? `${t.key}:${t.value}`\n            : t.key\n          : String(t)\n    ),\n    entityName: first(\n      event[\"affected_entity_name\"],\n      event.affectedEntityName,\n      \"\"\n    ),\n  };\n}\n\n// ============================================================================\n// Routing — pure, so it can be tested outside Dynatrace.\n// ============================================================================\n\nfunction matchesRule(ctx, match) {\n  if (match.managementZone) {\n    const wanted = [].concat(match.managementZone);\n    if (!ctx.managementZones.some((z) => wanted.includes(z))) return false;\n  }\n\n  if (match.entityTag) {\n    const wanted = [].concat(match.entityTag);\n    if (!ctx.tags.some((t) => wanted.includes(t))) return false;\n  }\n\n  if (match.titleMatches) {\n    // Support an inline (?i) prefix for case-insensitive matching.\n    let pattern = match.titleMatches;\n    let flags = \"\";\n    if (pattern.startsWith(\"(?i)\")) {\n      pattern = pattern.slice(4);\n      flags = \"i\";\n    }\n    if (!new RegExp(pattern, flags).test(ctx.title)) return false;\n  }\n\n  if (match.severity) {\n    const wanted = [].concat(match.severity);\n    if (!wanted.includes(ctx.severity)) return false;\n  }\n\n  // An empty match object would catch everything; DEFAULT_ROUTE is the way to\n  // express that, so treat it as a misconfiguration rather than a wildcard.\n  return Object.keys(match).length > 0;\n}\n\nfunction resolveRoute(ctx, table, fallback) {\n  for (const rule of table) {\n    if (matchesRule(ctx, rule.match)) return rule;\n  }\n  return fallback;\n}\n\n// ============================================================================\n// Decision\n// ============================================================================\n\nfunction decide(event, table = ROUTING_TABLE, fallback = DEFAULT_ROUTE) {\n  const ctx = extractContext(event);\n\n  // The defect this workflow exists to fix: Davis merges duplicate problems\n  // after the fact, and the classic integration cannot retract the incident it\n  // already opened. Filtering here means it is never opened.\n  if (ctx.isDuplicate) {\n    return {\n      action: \"skip\",\n      reason: \"merged duplicate\",\n      problemId: ctx.problemId,\n      displayId: ctx.displayId,\n    };\n  }\n\n  // No problem ID means nothing to correlate on, and an uncorrelated incident\n  // is exactly the duplicate this workflow exists to prevent — every update to\n  // the problem would open another ticket. During the period where the payload\n  // mapping is still unconfirmed this is the likely symptom of a wrong field\n  // name, so surface it as its own outcome rather than quietly creating junk.\n  // Wire this branch to a notification or log task, NOT to incident creation.\n  if (!ctx.problemId) {\n    return {\n      action: \"error\",\n      reason: \"no problem id on payload — check extractContext() mapping\",\n      title: ctx.title,\n    };\n  }\n\n  const route = resolveRoute(ctx, table, fallback);\n\n  if (ctx.status === \"CLOSED\" || ctx.status === \"RESOLVED\") {\n    return {\n      action: \"resolve\",\n      problemId: ctx.problemId,\n      displayId: ctx.displayId,\n      correlationId: ctx.problemId,\n      closeNotes: `Dynatrace problem ${ctx.displayId || ctx.problemId} closed.`,\n      route: route.name,\n    };\n  }\n\n  return {\n    action: \"create\",\n    problemId: ctx.problemId,\n    displayId: ctx.displayId,\n    correlationId: ctx.problemId,\n    shortDescription: ctx.title,\n    assignmentGroup: route.assignmentGroup,\n    category: route.category,\n    impact: route.impact,\n    route: route.name,\n    routedBy: route === fallback ? \"default\" : \"table\",\n  };\n}\n\n// === generated entrypoint (build_workflow.js) ==============================\n\nasync function loadEvent(executionId) {\n  try {\n    const { execution } = await import(\"@dynatrace-sdk/automation-utils\");\n    const ex = await execution(executionId);\n    const ev = typeof ex.event === \"function\" ? await ex.event() : ex.event;\n    if (ev) return ev;\n  } catch (e) {\n    console.log(\"could not load event from execution context: \" + e);\n  }\n  return {};\n}\n\nexport default async function ({ executionId }) {\n  const event = await loadEvent(executionId);\n  const decision = decide(event);\n  console.log(\"routing decision: \" + JSON.stringify(decision));\n  return decision;\n}\n"
+      },
+      "position": {
+        "x": 0,
+        "y": 1
+      },
+      "predecessors": []
+    },
+    "find_existing": {
+      "name": "find_existing",
+      "description": "Look for an incident already correlated to this problem.",
+      "action": "dynatrace.servicenow:snow-search-incidents",
+      "input": {
+        "connectionId": "REPLACE_WITH_SERVICENOW_CONNECTION_ID",
+        "sysparmQuery": "correlation_id={{ result('route_incident').correlationId }}",
+        "sysparmFields": "number,sys_id,state,correlation_id",
+        "sysparmLimit": 1
+      },
+      "position": {
+        "x": 0,
+        "y": 2
+      },
+      "predecessors": [
+        "route_incident"
+      ],
+      "conditions": {
+        "states": {
+          "route_incident": "OK"
+        },
+        "custom": "{{ result('route_incident').action in ['create', 'resolve'] }}",
+        "else": "SKIP"
+      }
+    },
+    "create_incident": {
+      "name": "create_incident",
+      "description": "Open an incident, routed by the table.",
+      "action": "dynatrace.servicenow:snow-create-incident",
+      "input": {
+        "connectionId": "REPLACE_WITH_SERVICENOW_CONNECTION_ID",
+        "correlationId": "{{ result('route_incident').correlationId }}",
+        "shortDescription": "{{ result('route_incident').shortDescription }}",
+        "description": "Dynatrace problem {{ result('route_incident').displayId }}\nRouted by: {{ result('route_incident').route }}",
+        "assignmentGroup": "{{ result('route_incident').assignmentGroup }}",
+        "category": "{{ result('route_incident').category }}",
+        "impact": "{{ result('route_incident').impact }}"
+      },
+      "position": {
+        "x": -1,
+        "y": 3
+      },
+      "predecessors": [
+        "find_existing"
+      ],
+      "conditions": {
+        "states": {
+          "find_existing": "OK"
+        },
+        "custom": "{{ result('route_incident').action == 'create' and result('find_existing').records | length == 0 }}",
+        "else": "SKIP"
+      }
+    },
+    "resolve_incident": {
+      "name": "resolve_incident",
+      "description": "Close the incident when the problem closes.",
+      "action": "dynatrace.servicenow:snow-resolve-incident",
+      "input": {
+        "connectionId": "REPLACE_WITH_SERVICENOW_CONNECTION_ID",
+        "number": "{{ result('find_existing').records[0].number }}",
+        "resolutionCode": "Solved (Permanently)",
+        "resolutionNotes": "{{ result('route_incident').closeNotes }}"
+      },
+      "position": {
+        "x": 1,
+        "y": 3
+      },
+      "predecessors": [
+        "find_existing"
+      ],
+      "conditions": {
+        "states": {
+          "find_existing": "OK"
+        },
+        "custom": "{{ result('route_incident').action == 'resolve' and result('find_existing').records | length > 0 }}",
+        "else": "SKIP"
+      }
+    },
+    "flag_mapping_error": {
+      "name": "flag_mapping_error",
+      "description": "Payload carried no problem id. Never create an incident here — without a correlation id every update opens another ticket.",
+      "action": "dynatrace.automations:run-javascript",
+      "input": {
+        "script": "export default async function () {\n  console.log(\"ROUTING ERROR: no problem id on the event payload. \" +\n    \"Fix extractContext() in the route_incident task.\");\n  return { alerted: true };\n}\n"
+      },
+      "position": {
+        "x": 0,
+        "y": 3
+      },
+      "predecessors": [
+        "route_incident"
+      ],
+      "conditions": {
+        "states": {
+          "route_incident": "OK"
+        },
+        "custom": "{{ result('route_incident').action == 'error' }}",
+        "else": "SKIP"
+      }
+    }
+  }
+}
